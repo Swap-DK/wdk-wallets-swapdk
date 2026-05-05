@@ -1,6 +1,6 @@
 {
   "name": "@swapdk/wdk-wallet-cosmos",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WDK wallet module for Cosmos-SDK chains, with first-class support for THORChain (RUNE) and MAYAChain (CACAO) swap-deposit messages. Fork of @base58-io/wdk-wallet-cosmos.",
   "keywords": [
     "wdk",
@@ -71,7 +71,7 @@
     "bare-node-runtime": "1.1.4",
     "bip39": "3.1.0",
     "chain-registry": "2.0.109",
-    "protobufjs": "7.5.4",
+    "protobufjs": "7.5.6",
     "sodium-universal": "5.0.1"
   },
   "devDependencies": {

@@ -38,7 +38,14 @@
 
 'use strict'
 
-import { Reader, Writer } from 'protobufjs/minimal.js'
+// `protobufjs/minimal.js` is CommonJS (`module.exports = require(...)`) so
+// Node's strict ESM loader can't pick out named exports from it. Default
+// import + destructure is the portable form that works in both ESM and CJS
+// runtimes; vitest is more permissive than Node so the named-import form
+// passed unit tests but failed when the published package was imported by
+// a real ESM consumer.
+import minimal from 'protobufjs/minimal.js'
+const { Reader, Writer } = minimal
 
 export const TYPE_URL_MSG_DEPOSIT = '/types.MsgDeposit'
 

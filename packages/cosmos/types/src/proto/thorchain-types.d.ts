@@ -14,7 +14,7 @@
 export function parseAssetString(input: string): ReturnType<typeof Asset.fromPartial>;
 export const TYPE_URL_MSG_DEPOSIT: "/types.MsgDeposit";
 export namespace Asset {
-    function encode(message: any, writer?: Writer | import("protobufjs").BufferWriter): Writer | import("protobufjs").BufferWriter;
+    function encode(message: any, writer?: minimal.Writer | minimal.BufferWriter): minimal.Writer | minimal.BufferWriter;
     function decode(input: any, length: any): {
         chain: string;
         symbol: string;
@@ -33,7 +33,7 @@ export namespace Asset {
     };
 }
 export namespace Coin {
-    function encode(message: any, writer?: Writer | import("protobufjs").BufferWriter): Writer | import("protobufjs").BufferWriter;
+    function encode(message: any, writer?: minimal.Writer | minimal.BufferWriter): minimal.Writer | minimal.BufferWriter;
     function decode(input: any, length: any): {
         asset: undefined;
         amount: string;
@@ -46,7 +46,7 @@ export namespace Coin {
     };
 }
 export namespace MsgDeposit {
-    function encode(message: any, writer?: Writer | import("protobufjs").BufferWriter): Writer | import("protobufjs").BufferWriter;
+    function encode(message: any, writer?: minimal.Writer | minimal.BufferWriter): minimal.Writer | minimal.BufferWriter;
     function decode(input: any, length: any): {
         coins: never[];
         memo: string;
@@ -58,4 +58,4 @@ export namespace MsgDeposit {
         signer: Uint8Array<ArrayBuffer>;
     };
 }
-import { Writer } from 'protobufjs/minimal.js';
+import minimal from 'protobufjs/minimal.js';
