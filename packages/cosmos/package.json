@@ -1,0 +1,84 @@
+{
+  "name": "@swapdk/wdk-wallet-cosmos",
+  "version": "0.1.0",
+  "description": "WDK wallet module for Cosmos-SDK chains, with first-class support for THORChain (RUNE) and MAYAChain (CACAO) swap-deposit messages. Fork of @base58-io/wdk-wallet-cosmos.",
+  "keywords": [
+    "wdk",
+    "wallet",
+    "cosmos",
+    "thorchain",
+    "mayachain",
+    "rune",
+    "cacao",
+    "swapdk"
+  ],
+  "author": "SwapDK",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Swap-DK/wdk-wallets-swapdk.git",
+    "directory": "packages/cosmos"
+  },
+  "bugs": {
+    "url": "https://github.com/Swap-DK/wdk-wallets-swapdk/issues"
+  },
+  "homepage": "https://swapdk.com",
+  "files": [
+    "index.js",
+    "bare.js",
+    "src/",
+    "types/",
+    "!types/tests/",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "main": "index.js",
+  "type": "module",
+  "types": "./types/index.d.ts",
+  "scripts": {
+    "clean": "rm -rf types",
+    "build": "tsc",
+    "prepack": "npm run clean && npm run build",
+    "lint": "tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "bare": "./bare.js",
+      "default": "./index.js"
+    },
+    "./package": {
+      "default": "./package.json"
+    }
+  },
+  "imports": {
+    "crypto": {
+      "bare": "bare-crypto",
+      "default": "crypto"
+    },
+    "crypto/*": {
+      "bare": "bare-crypto/*",
+      "default": "crypto/*"
+    }
+  },
+  "dependencies": {
+    "@cosmjs/crypto": "0.37.0",
+    "@cosmjs/encoding": "0.37.0",
+    "@cosmjs/proto-signing": "0.37.0",
+    "@cosmjs/stargate": "0.37.0",
+    "@tetherto/wdk-wallet": "1.0.0-beta.7",
+    "bare-node-runtime": "1.1.4",
+    "bip39": "3.1.0",
+    "chain-registry": "2.0.109",
+    "protobufjs": "7.5.4",
+    "sodium-universal": "5.0.1"
+  },
+  "devDependencies": {
+    "@types/jest": "30.0.0",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "bare-tls": "2.1.7"
+  }
+}

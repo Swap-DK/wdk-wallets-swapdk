@@ -1,0 +1,37 @@
+{
+  "name": "wdk-wallets-swapdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Monorepo for SwapDK WDK wallet modules — forks and extensions of @tetherto/wdk-wallet-* and community alternatives, where features needed by SwapDK aren't yet upstream.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "npm run clean --workspaces --if-present",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "npm run build && changeset publish"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Swap-DK/wdk-wallets-swapdk.git"
+  },
+  "author": "SwapDK",
+  "bugs": {
+    "url": "https://github.com/Swap-DK/wdk-wallets-swapdk/issues"
+  },
+  "homepage": "https://swapdk.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "vitest": "^4.1.4"
+  }
+}

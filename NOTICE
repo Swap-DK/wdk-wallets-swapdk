@@ -1,0 +1,13 @@
+SwapDK WDK wallet modules
+Copyright 2025 SwapDK
+
+This product includes software developed by Tether Operations Limited.
+The package @swapdk/wdk-wallet-cosmos is a fork of @base58-io/wdk-wallet-cosmos
+(https://github.com/base58-io/wdk-wallet-cosmos), licensed under Apache 2.0.
+
+Original copyright:
+  Copyright 2024 Tether Operations Limited
+
+Modifications by SwapDK add support for THORChain (RUNE) and MAYAChain (CACAO)
+swap-deposit messages, which the upstream package does not currently expose.
+Specific modifications are noted in the changed files via header comments.
