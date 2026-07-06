@@ -1,0 +1,70 @@
+{
+  "name": "@swapdk/wdk-wallet-tron",
+  "version": "0.2.0",
+  "description": "WDK wallet module for TRON, extending @tetherto/wdk-wallet-tron with raw-calldata contract calls so sendTransaction can invoke arbitrary smart contracts (e.g. THORChain router depositWithExpiry). Fork of @tetherto/wdk-wallet-tron.",
+  "keywords": [
+    "wdk",
+    "wallet",
+    "bip-32",
+    "tron",
+    "thorchain",
+    "swapdk"
+  ],
+  "author": "SwapDK",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Swap-DK/wdk-wallets-swapdk.git",
+    "directory": "packages/tron"
+  },
+  "bugs": {
+    "url": "https://github.com/Swap-DK/wdk-wallets-swapdk/issues"
+  },
+  "homepage": "https://swapdk.com",
+  "main": "index.js",
+  "type": "module",
+  "types": "./types/index.d.ts",
+  "files": [
+    "index.js",
+    "bare.js",
+    "src/",
+    "types/",
+    "!types/tests/",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf types",
+    "build": "tsc",
+    "prepack": "npm run clean && npm run build",
+    "lint": "tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "bare": "./bare.js",
+      "default": "./index.js"
+    },
+    "./package": {
+      "default": "./package.json"
+    }
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.2",
+    "@noble/hashes": "1.3.3",
+    "@noble/secp256k1": "2.2.3",
+    "@scure/bip32": "1.7.0",
+    "@tetherto/wdk-wallet": "1.0.0-beta.8",
+    "bare-node-runtime": "1.3.1",
+    "bip39": "3.1.0",
+    "sodium-universal": "5.0.1",
+    "tronweb": "6.2.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "axios": "1.12.2"
+  }
+}

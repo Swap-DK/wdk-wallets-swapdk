@@ -1,0 +1,125 @@
+# Raw-calldata contract-call support for @tetherto/wdk-wallet-tron@1.0.0-beta.5
+# Apply with: cd <wdk-wallet-tron-repo> && git apply <this-file>
+
+--- a/src/wallet-account-tron.js
++++ b/src/wallet-account-tron.js
+@@ -153,44 +153,109 @@
+   /**
+    * Signs a transaction.
+    *
++   * Two modes:
++   *   - Plain TRX transfer (default): pass `{ to, value }`. Builds a
++   *     `TransferContract` via tronweb's `sendTrx`.
++   *   - Smart-contract call: pass `{ to, value, data, feeLimit }` where
++   *     `data` is the full ABI-encoded calldata (selector + args). Builds
++   *     a `TriggerSmartContract` with the raw `data` field set verbatim,
++   *     via `transactionBuilder.triggerSmartContract` with an empty
++   *     function selector and the `input` option. `value` becomes
++   *     `callValue` (sun); `feeLimit` is the per-tx energy cap.
++   *
+    * @param {TronTransaction} tx - The transaction to sign.
+    * @returns {Promise<SignedTransaction>} The signed transaction.
+    */
+-  async signTransaction ({ to, value }) {
++  async signTransaction ({ to, value, data, feeLimit }) {
+     if (!this._tronWeb) {
+       throw new Error('The wallet must be connected to tron web to sign transactions.')
+     }
+ 
+-    const address = await this.getAddress()
+-
+-    const transaction = await this._tronWeb.transactionBuilder.sendTrx(to, value, address)
+-
++    const transaction = await this._buildTronTransaction({ to, value, data, feeLimit })
+     return await this._signTransaction(transaction)
+   }
+ 
+   /**
+    * Sends a transaction.
+    *
++   * Same dispatch as `signTransaction` — plain TRX when `data` is
++   * omitted, smart-contract call when supplied. See `signTransaction`
++   * for the full options reference.
++   *
++   * The reported `fee` is the bandwidth cost for plain transfers (the
++   * pre-broadcast amount upstream returns). For contract calls the
++   * actual energy burn is wallet-side and known only after the tx
++   * lands on-chain; we surface `feeLimit` (the per-tx cap committed
++   * to the transaction) as the conservative upper bound, falling back
++   * to bandwidth when `feeLimit` is unset.
++   *
+    * @param {TronTransaction} tx - The transaction.
+    * @returns {Promise<TransactionResult>} The transaction's result.
+    */
+-  async sendTransaction ({ to, value }) {
++  async sendTransaction ({ to, value, data, feeLimit }) {
+     if (!this._tronWeb) {
+       throw new Error('The wallet must be connected to tron web to send transactions.')
+     }
+ 
+-    const address = await this.getAddress()
++    const transaction = await this._buildTronTransaction({ to, value, data, feeLimit })
+ 
+-    const transaction = await this._tronWeb.transactionBuilder.sendTrx(to, value, address)
+-    const fee = await this._getBandwidthCost(transaction)
++    const bandwidth = await this._getBandwidthCost(transaction)
+     const signedTransaction = await this._signTransaction(transaction)
+ 
+     const { txid } = await this._tronWeb.trx.sendRawTransaction(signedTransaction)
+ 
+-    return { hash: txid, fee: BigInt(fee) }
++    // For contract calls we don't know the actual energy burn before
++    // confirmation. Reporting feeLimit gives the caller the worst
++    // case the wallet committed to.
++    const fee = data && feeLimit !== undefined
++      ? BigInt(feeLimit)
++      : BigInt(bandwidth)
++
++    return { hash: txid, fee }
+   }
+ 
+   /**
++   * @private
++   * Build either a TransferContract (plain TRX) or a TriggerSmartContract
++   * (raw calldata) transaction from caller-supplied options.
++   */
++  async _buildTronTransaction ({ to, value, data, feeLimit }) {
++    const address = await this.getAddress()
++
++    if (!data) {
++      // Upstream-equivalent plain TRX transfer path.
++      return await this._tronWeb.transactionBuilder.sendTrx(to, value, address)
++    }
++
++    // Smart-contract call with raw calldata.
++    //
++    // tronweb's `triggerSmartContract` accepts `options.input` as the
++    // full hex calldata when the `functionSelector` argument is empty;
++    // see `TransactionBuilder._getTriggerSmartContractArgs` (line ~825
++    // in tronweb@6.2.0: `else if (options.input) args.data = options.input;`).
++    const addressHex = this._tronWeb.address.toHex(address)
++    const inputHex = String(data).replace(/^0x/, '')
++    const callValue = value !== undefined ? Number(value) : 0
++    const energyCap = feeLimit !== undefined
++      ? Number(feeLimit)
++      : this._tronWeb.feeLimit
++
++    const { transaction } = await this._tronWeb.transactionBuilder.triggerSmartContract(
++      to,
++      '',
++      {
++        feeLimit: energyCap,
++        callValue,
++        input: inputHex
++      },
++      [],
++      addressHex
++    )
++
++    return transaction
++  }
++
++  /**
+    * Transfers a token to another address.
+    *
+    * @param {TransferOptions} options - The transfer's options.

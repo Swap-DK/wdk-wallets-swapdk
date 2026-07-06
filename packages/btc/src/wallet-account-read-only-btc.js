@@ -1,0 +1,562 @@
+// Copyright 2024 Tether Operations Limited
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+'use strict'
+
+// SwapDK fork note: this file is mostly the upstream
+// @tetherto/wdk-wallet-btc@1.0.0-beta.9 verbatim. Modifications:
+//   - quoteSendTransaction / getMaxSpendable / _planSpend accept an
+//     optional `memo` argument; when supplied, the fee estimate /
+//     spendable target accounts for the extra vbytes the OP_RETURN
+//     output adds, so the two-pass adjustment in
+//     WalletAccountBtc._getRawTransaction doesn't have to claw fee
+//     from change after the fact
+//   - module-level _opReturnVBytes() helper near the top of the file
+
+import { WalletAccountReadOnly } from '@tetherto/wdk-wallet'
+
+import { coinselect } from '@bitcoinerlab/coinselect'
+import { DescriptorsFactory } from '@bitcoinerlab/descriptors'
+import * as ecc from '@bitcoinerlab/secp256k1'
+
+import { address as btcAddress, networks, Transaction } from 'bitcoinjs-lib'
+import bitcoinMessageModule from 'bitcoinjs-message'
+
+import FailoverProvider from '@tetherto/wdk-failover-provider'
+
+import { BlockbookClient, ElectrumTcp, ElectrumSsl, ElectrumTls, ElectrumWs } from './transports/index.js'
+
+const bitcoinMessage = bitcoinMessageModule.default ?? bitcoinMessageModule
+
+/** @typedef {import('./transports/index.js').MempoolElectrumConfig} MempoolElectrumConfig */
+/** @typedef {import('./transports/index.js').MempoolElectrumClient} MempoolElectrumClient */
+/** @typedef {import('./transports/index.js').IBtcClient} IBtcClient */
+/** @typedef {import('./transports/blockbook-client.js').BlockbookClientConfig} BlockbookClientConfig */
+/** @typedef {import('./transports/ws.js').ElectrumWsConfig} ElectrumWsConfig */
+
+/** @typedef {import('@bitcoinerlab/coinselect').OutputWithValue} OutputWithValue */
+/** @typedef {import('bitcoinjs-lib').Network} Network */
+/** @typedef {import('bitcoinjs-lib').Transaction} BtcTransactionReceipt */
+
+/** @typedef {import('@tetherto/wdk-wallet').TransactionResult} TransactionResult */
+/** @typedef {import('@tetherto/wdk-wallet').TransferOptions} TransferOptions */
+/** @typedef {import('@tetherto/wdk-wallet').TransferResult} TransferResult */
+
+/**
+ * @typedef {Object} BtcTransaction
+ * @property {string} to - The transaction's recipient.
+ * @property {number | bigint} value - The amount of bitcoins to send to the recipient (in satoshis).
+ * @property {number} [confirmationTarget] - Optional confirmation target in blocks (default: 1).
+ * @property {number | bigint} [feeRate] - Optional fee rate in satoshis per virtual byte. If provided, this value overrides the fee rate estimated from the blockchain (default: undefined).
+ */
+
+/**
+ * @typedef {BtcBlockbookHttpClientDescriptor | BtcElectrumClientDescriptor | BtcElectrumWsClientDescriptor} BtcClientDescriptor
+ */
+
+/**
+ * @typedef {Object} BtcBlockbookHttpClientDescriptor
+ * @property {'blockbook-http'} type - The client's type.
+ * @property {BlockbookClientConfig} clientConfig - The client's configuration.
+ */
+
+/**
+ * @typedef {Object} BtcElectrumWsClientDescriptor
+ * @property {'electrum-ws'} type - Use a WebSocket Electrum client.
+ * @property {Omit<ElectrumWsConfig, 'network'>} clientConfig - The WebSocket client configuration.
+ */
+
+/**
+ * @typedef {Object} BtcElectrumClientDescriptor
+ * @property {'electrum'} type - Use a TCP/TLS/SSL Electrum client.
+ * @property {Omit<MempoolElectrumConfig, 'network'>} clientConfig - The Electrum client configuration.
+ */
+
+/**
+ * @typedef {Object} BtcWalletConfig
+ * @property {IBtcClient | BtcClientDescriptor | Array<IBtcClient | BtcClientDescriptor>} [client] - The bitcoin client, or a list of bitcoin client options for connection fallback.
+ * @property {"bitcoin" | "regtest" | "testnet"} [network] - The name of the network to use (default: "bitcoin").
+ * @property {44 | 84} [bip] - The BIP address type used for key and address derivation.
+ *   - 44: [BIP-44 (P2PKH / legacy)](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki)
+ *   - 84: [BIP-84 (P2WPKH / native SegWit)](https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki)
+ *   - Default: 84 (P2WPKH).
+ * @property {number} [retries] - The number of retries in the failover mechanism.
+ */
+
+/**
+ * @typedef {Object} BtcMaxSpendableResult
+ * @property {bigint} amount - The maximum spendable amount in satoshis.
+ * @property {bigint} fee - The estimated network fee in satoshis.
+ * @property {bigint} changeValue - The estimated change value in satoshis.
+ */
+
+const { Output } = DescriptorsFactory(ecc)
+
+const MIN_TX_FEE_SATS = 141
+const MAX_UTXO_INPUTS = 200
+
+// Tx-level vbytes contributed by an OP_RETURN output carrying `dataLen`
+// bytes of payload:
+//   8  (value u64)
+// + 1  (script-length varint — always 1 byte for OP_RETURN scripts)
+// + 1  (OP_RETURN opcode)
+// + 1  (OP_PUSHBYTES_n for n ≤ 75, OP_PUSHDATA1 for 76 ≤ n ≤ 80)
+// + 1  (extra byte for OP_PUSHDATA1's length prefix when n ≥ 76)
+// + n  (payload)
+// Upper-bounded by `12 + dataLen` for n ≤ 75 and `13 + dataLen` for
+// 76 ≤ n ≤ 80; we use the larger of the two so coin-selection always
+// over-provisions rather than under-provisions the fee.
+export function _opReturnVBytes (dataLen) {
+  if (!dataLen || dataLen <= 0) return 0
+  return dataLen >= 76 ? 13 + dataLen : 12 + dataLen
+}
+
+const BIP_BY_ADDRESS_PREFIX = {
+  1: 44,
+  m: 44,
+  n: 44,
+  bc1q: 84,
+  tb1q: 84,
+  bcrt1q: 84
+}
+
+const DUST_LIMIT = {
+  44: 546n,
+  84: 294n
+}
+
+export default class WalletAccountReadOnlyBtc extends WalletAccountReadOnly {
+  /**
+   * Creates a new bitcoin read-only wallet account.
+   *
+   * @param {string} address - The account's address.
+   * @param {Omit<BtcWalletConfig, 'bip'>} [config] - The configuration object.
+   */
+  constructor (address, config = {}) {
+    super(address)
+
+    /**
+     * The read-only wallet account configuration.
+     *
+     * @protected
+     * @type {Omit<BtcWalletConfig, 'bip'>}
+     */
+    this._config = config
+
+    /**
+     * The network.
+     *
+     * @protected
+     * @type {Network}
+     */
+    this._network = networks[this._config.network] || networks.bitcoin
+
+    const clientOptions = config.client ? [config.client].flat() : [{ type: 'electrum', clientConfig: { host: 'electrum.blockstream.info', port: 50_001 } }]
+
+    /**
+     * A list of all the bitcoin client options.
+     *
+     * @protected
+     * @type {Array<IBtcClient>}
+     */
+    this._clientList = clientOptions.map(client => WalletAccountReadOnlyBtc._createClient(client, this._config.network))
+
+    /**
+     * A client to interact with the bitcoin network.
+     *
+     * @protected
+     * @type {IBtcClient}
+     */
+    this._client = this._clientList[0]
+
+    if (this._clientList.length > 1) {
+      const failoverProvider = new FailoverProvider({ retries: this._config.retries })
+      for (const entry of this._clientList) {
+        failoverProvider.addProvider(entry)
+      }
+      this._client = failoverProvider.initialize()
+    }
+
+    const prefix = Object.keys(BIP_BY_ADDRESS_PREFIX).find(p => address.startsWith(p))
+    const bip = BIP_BY_ADDRESS_PREFIX[prefix] || 44
+
+    /**
+     * The dust limit in satoshis based on the BIP type.
+     *
+     * @private
+     * @type {bigint}
+     */
+    this._dustLimit = DUST_LIMIT[bip]
+  }
+
+  /**
+   * Returns the account's bitcoin balance.
+   *
+   * @returns {Promise<bigint>} The bitcoin balance (in satoshis).
+   */
+  async getBalance () {
+    await this._ensureConnected()
+
+    const address = await this.getAddress()
+
+    const { confirmed, unconfirmed } = await this._client.getBalance(address)
+
+    return BigInt(confirmed + (unconfirmed || 0))
+  }
+
+  /**
+   * Returns the account balance for a specific token.
+   *
+   * @param {string} tokenAddress - The smart contract address of the token.
+   * @returns {Promise<bigint>} The token balance (in base unit).
+   */
+  async getTokenBalance (tokenAddress) {
+    throw new Error("The 'getTokenBalance' method is not supported on the bitcoin blockchain.")
+  }
+
+  /**
+   * Quotes the costs of a send transaction operation.
+   *
+   * @param {BtcTransaction} tx - The transaction.
+   * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
+   */
+  async quoteSendTransaction ({ to, value, feeRate, confirmationTarget = 1, memo }) {
+    await this._ensureConnected()
+
+    const address = await this.getAddress()
+
+    if (!feeRate) {
+      const feeEstimate = await this._client.estimateFee(confirmationTarget)
+      feeRate = this._toBigInt(Math.max(feeEstimate * 100_000, 1))
+    }
+
+    const { fee } = await this._planSpend({
+      fromAddress: address,
+      toAddress: to,
+      amount: value,
+      feeRate,
+      memo
+    })
+
+    return { fee: BigInt(fee) }
+  }
+
+  /**
+   * Quotes the costs of a transfer operation.
+   *
+   * @param {TransferOptions} options - The transfer's options.
+   * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
+   */
+  async quoteTransfer (options) {
+    throw new Error("The 'quoteTransfer' method is not supported on the bitcoin blockchain.")
+  }
+
+  /**
+   * Returns a transaction's receipt.
+   *
+   * @param {string} hash - The transaction's hash.
+   * @returns {Promise<BtcTransactionReceipt | null>} – The receipt, or null if the transaction has not been included in a block yet.
+   */
+  async getTransactionReceipt (hash) {
+    if (!/^[0-9a-fA-F]{64}$/.test(hash)) {
+      throw new Error("The 'getTransactionReceipt(hash)' method requires a valid transaction hash to fetch the receipt.")
+    }
+
+    await this._ensureConnected()
+
+    const address = await this.getAddress()
+    const history = await this._client.getHistory(address)
+    const item = Array.isArray(history) ? history.find(h => h?.tx_hash === hash) : null
+
+    if (!item || !item.height || item.height <= 0) {
+      return null
+    }
+
+    const hex = await this._client.getTransaction(hash)
+
+    const transaction = Transaction.fromHex(hex)
+
+    return transaction
+  }
+
+  /**
+   * Returns an estimation of the maximum spendable amount (in satoshis) that can be sent in
+   * a single transaction, after subtracting estimated transaction fees.
+   *
+   * The estimated maximum spendable amount can differ from the wallet's total balance.
+   * A transaction can only include up to MAX_UTXO_INPUTS (default: 200) unspents.
+   * Wallets holding more than this limit cannot spend their full balance in a
+   * single transaction. There will likely be some satoshis left over as change.
+   *
+   * @param {Object} [opts] - Options.
+   * @param {number | bigint} [opts.feeRate] - Fee rate in sat/vB. If omitted, estimated via the client.
+   * @param {string | Uint8Array | Buffer} [opts.memo] - Optional OP_RETURN memo bytes to account for. When supplied, the spendable target leaves room for the OP_RETURN output.
+   * @returns {Promise<BtcMaxSpendableResult>} The estimated maximum spendable result.
+   */
+  async getMaxSpendable (opts = {}) {
+    await this._ensureConnected()
+
+    const fromAddress = await this.getAddress()
+
+    let feeRate
+    if (opts.feeRate) {
+      feeRate = Number(opts.feeRate)
+    } else {
+      const feeRateRaw = await this._client.estimateFee(1)
+      feeRate = Math.max(Math.round(Number(feeRateRaw) * 100_000), 1)
+    }
+
+    const unspent = await this._client.listUnspent(fromAddress)
+    if (!unspent || unspent.length === 0) {
+      return { amount: 0n, fee: 0n, changeValue: 0n }
+    }
+
+    const addr = String(fromAddress).toLowerCase()
+    const isP2WPKH =
+      addr.startsWith('bc1q') ||
+      addr.startsWith('tb1q') ||
+      addr.startsWith('bcrt1q')
+    const inputVBytes = isP2WPKH ? 68 : 148
+
+    const perInputFee = Math.ceil(inputVBytes * feeRate)
+    let spendableUtxos = unspent.filter(u => (u.value - perInputFee) > 0)
+    if (spendableUtxos.length === 0) {
+      return { amount: 0n, fee: 0n, changeValue: 0n }
+    }
+
+    if (spendableUtxos.length > MAX_UTXO_INPUTS) {
+      spendableUtxos = spendableUtxos
+        .sort((a, b) => b.value - a.value)
+        .slice(0, MAX_UTXO_INPUTS)
+    }
+
+    const totalInputValueSats = spendableUtxos.reduce((sum, u) => sum + u.value, 0)
+    const inputCount = spendableUtxos.length
+    const txOverheadVBytes = 11
+    const outputVBytes = 34
+
+    const memoVBytes = opts.memo !== undefined && opts.memo !== null
+      ? _opReturnVBytes(typeof opts.memo === 'string'
+        ? Buffer.byteLength(opts.memo, 'utf8')
+        : opts.memo.length)
+      : 0
+
+    const twoOutputsVSize = txOverheadVBytes + (inputCount * inputVBytes) + (2 * outputVBytes) + memoVBytes
+    const twoOutputsFeeSats = Math.max(Math.ceil(twoOutputsVSize * feeRate), MIN_TX_FEE_SATS)
+    const twoOutputsRecipientAmountSats = totalInputValueSats - twoOutputsFeeSats - Number(this._dustLimit)
+    if (twoOutputsRecipientAmountSats > Number(this._dustLimit)) {
+      return {
+        amount: BigInt(twoOutputsRecipientAmountSats),
+        fee: BigInt(twoOutputsFeeSats),
+        changeValue: this._dustLimit
+      }
+    }
+
+    const oneOutputVSize = txOverheadVBytes + (inputCount * inputVBytes) + outputVBytes + memoVBytes
+    const oneOutputFeeSats = Math.max(Math.ceil(oneOutputVSize * feeRate), MIN_TX_FEE_SATS)
+    const oneOutputRecipientAmountSats = totalInputValueSats - oneOutputFeeSats
+    if (oneOutputRecipientAmountSats <= this._dustLimit) {
+      return { amount: 0n, fee: 0n, changeValue: 0n }
+    }
+
+    return {
+      amount: BigInt(oneOutputRecipientAmountSats),
+      fee: BigInt(oneOutputFeeSats),
+      changeValue: 0n
+    }
+  }
+
+  /**
+   * Verifies a message's signature.
+   *
+   * @param {string} message - The original message.
+   * @param {string} signature - The signature to verify.
+   * @returns {Promise<boolean>} True if the signature is valid.
+   */
+  async verify (message, signature) {
+    return bitcoinMessage
+      .verify(
+        message,
+        await this.getAddress(),
+        signature,
+        null,
+        true
+      )
+  }
+
+  /**
+   * A list that maps each client to a flag that is true only if the client was externally provided.
+   *
+   * @protected
+   * @type {Array<boolean>}
+   */
+  get _isExternalClient () {
+    if (!this._config.client) return [false]
+    return [this._config.client].flat().map(client => typeof client.connect === 'function')
+  }
+
+  /**
+   * Closes any internal connection with the server.
+   */
+  dispose () {
+    for (const [i, isExternal] of this._isExternalClient.entries()) {
+      if (!isExternal) {
+        this._clientList[i].close()
+      }
+    }
+  }
+
+  /**
+   * Creates a bitcoin client from a descriptor, or returns the client as-is if already instantiated.
+   *
+   * @protected
+   * @param {IBtcClient | BtcClientDescriptor} client - The bitcoin client or client descriptor.
+   * @param {"bitcoin" | "regtest" | "testnet"} [network] - The network name.
+   * @returns {IBtcClient} The bitcoin client.
+   */
+  static _createClient (client, network) {
+    if (typeof client.connect === 'function') {
+      return client
+    }
+
+    const { type, clientConfig } = client
+
+    switch (type) {
+      case 'blockbook-http':
+        return new BlockbookClient(clientConfig)
+      case 'electrum-ws':
+        return new ElectrumWs({ ...clientConfig, network })
+      case 'electrum': {
+        const transportConfig = { ...clientConfig, network }
+        switch (clientConfig.protocol) {
+          case 'tls':
+            return new ElectrumTls(transportConfig)
+          case 'ssl':
+            return new ElectrumSsl(transportConfig)
+          default:
+            return new ElectrumTcp(transportConfig)
+        }
+      }
+    }
+  }
+
+  /**
+   * Ensures the client is connected.
+   *
+   * @protected
+   * @returns {Promise<void>}
+   */
+  async _ensureConnected () {
+    await this._client.connect()
+  }
+
+  /** @private */
+  _toBigInt (v) { return typeof v === 'bigint' ? v : BigInt(Math.round(Number(v))) }
+
+  /**
+   * Builds and returns a fee-aware funding plan for sending a transaction.
+   *
+   * Uses descriptors + coinselect to choose inputs, at a given feeRate (sats/vB). Returns the selected
+   * UTXOs (in the shape expected by the PSBT builder), the computed fee, and the resulting change value.
+   *
+   * @protected
+   * @param {Object} tx - The transaction.
+   * @param {string} tx.fromAddress - The sender's address.
+   * @param {string} tx.toAddress - The recipient's address.
+   * @param {number | bigint} tx.amount - The amount to send (in satoshis).
+   * @param {number | bigint} tx.feeRate - The fee rate (in sats/vB).
+   * @param {string | Uint8Array | Buffer} [tx.memo] - Optional OP_RETURN memo bytes; when supplied, the fee is padded for the extra output.
+   * @returns {Promise<{ utxos: OutputWithValue[], fee: number, changeValue: number }>} - The funding plan.
+   */
+  async _planSpend ({ fromAddress, toAddress, amount, feeRate, memo }) {
+    amount = this._toBigInt(amount)
+    feeRate = this._toBigInt(feeRate)
+    if (feeRate < 1n) feeRate = 1n
+
+    if (amount <= this._dustLimit) {
+      throw new Error(`The amount must be bigger than the dust limit (= ${this._dustLimit}).`)
+    }
+
+    const memoBytesLen = memo === undefined || memo === null
+      ? 0
+      : (typeof memo === 'string' ? Buffer.byteLength(memo, 'utf8') : memo.length)
+    const opReturnFee = memoBytesLen > 0
+      ? this._toBigInt(Math.ceil(_opReturnVBytes(memoBytesLen) * Number(feeRate)))
+      : 0n
+
+    const network = this._network
+
+    const fromAddressScriptHex = btcAddress.toOutputScript(fromAddress, network).toString('hex')
+    const fromAddressOutput = new Output({ descriptor: `addr(${fromAddress})`, network })
+    const toAddressOutput = new Output({ descriptor: `addr(${toAddress})`, network })
+
+    const unspent = await this._client.listUnspent(fromAddress)
+
+    if (!unspent || unspent.length === 0) {
+      throw new Error('No unspent outputs available.')
+    }
+
+    const utxosForCoinSelect = unspent.map(u => ({
+      output: fromAddressOutput,
+      value: u.value,
+      __ref: u
+    }))
+
+    const result = coinselect({
+      utxos: utxosForCoinSelect,
+      remainder: fromAddressOutput,
+      targets: [{ output: toAddressOutput, value: Number(amount) }],
+      feeRate: Number(feeRate)
+    })
+
+    if (!result) {
+      throw new Error('Insufficient balance to send the transaction.')
+    }
+
+    if (result.utxos.length > MAX_UTXO_INPUTS) {
+      throw new Error('Exceeded maximum allowed inputs for transaction.')
+    }
+
+    // coinselect was unaware of the OP_RETURN output (it isn't a
+    // spendable target); pad the fee here so the change covers it. If
+    // the inputs don't cover the bump, fall through to the existing
+    // insufficient-balance branch below.
+    const fee = this._toBigInt(Math.max(result.fee ?? 0, MIN_TX_FEE_SATS)) + opReturnFee
+
+    const utxos = result.utxos.map(({ __ref }) => ({
+      ...__ref,
+      vout: {
+        value: this._toBigInt(__ref.value),
+        scriptPubKey: { hex: fromAddressScriptHex }
+      }
+    }))
+
+    const total = utxos.reduce((s, u) => s + this._toBigInt(u.value), 0n)
+    const changeValue = total - fee - amount
+
+    if (changeValue < 0n) {
+      throw new Error('Insufficient balance after fees.')
+    }
+
+    if (changeValue <= this._dustLimit) {
+      return {
+        utxos,
+        fee: fee + changeValue,
+        changeValue: 0n
+      }
+    }
+
+    return { utxos, fee, changeValue }
+  }
+}

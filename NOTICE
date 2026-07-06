@@ -1,13 +1,31 @@
 SwapDK WDK wallet modules
-Copyright 2025 SwapDK
+Copyright 2025-2026 SwapDK
 
 This product includes software developed by Tether Operations Limited.
+
 The package @swapdk/wdk-wallet-cosmos is a fork of @base58-io/wdk-wallet-cosmos
 (https://github.com/base58-io/wdk-wallet-cosmos), licensed under Apache 2.0.
-
-Original copyright:
-  Copyright 2024 Tether Operations Limited
-
 Modifications by SwapDK add support for THORChain (RUNE) and MAYAChain (CACAO)
 swap-deposit messages, which the upstream package does not currently expose.
+
+The package @swapdk/wdk-wallet-btc is a fork of @tetherto/wdk-wallet-btc
+(https://github.com/tetherto/wdk-wallet-btc), licensed under Apache 2.0.
+Modifications by SwapDK add optional `memo` support on `sendTransaction`,
+`signTransaction`, `quoteSendTransaction`, and `getMaxSpendable`, emitted as
+an OP_RETURN output (≤80 bytes). Required for THORChain / MAYAChain inbound
+observation, which routes on the OP_RETURN payload of the BTC deposit.
+
+The package @swapdk/wdk-wallet-tron is a fork of @tetherto/wdk-wallet-tron
+(https://github.com/tetherto/wdk-wallet-tron), licensed under Apache 2.0.
+Modifications by SwapDK add optional `data` (raw hex calldata) and `feeLimit`
+(SUN cap on energy) to `sendTransaction` and `signTransaction`. When `data`
+is supplied, the wallet emits a `TriggerSmartContract` with the calldata
+verbatim (via tronweb's `input` option on `triggerSmartContract` with an
+empty function selector). Required for invoking the THORChain router's
+`depositWithExpiry(...)` from TRON, which the upstream's hardcoded TRC-20
+`transfer(address,uint256)` and plain TRX `sendTrx` paths cannot construct.
+
+Original copyright for all three upstreams:
+  Copyright 2024 Tether Operations Limited
+
 Specific modifications are noted in the changed files via header comments.

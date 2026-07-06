@@ -1,0 +1,24 @@
+@swapdk/wdk-wallet-tron
+Copyright 2026 SwapDK
+
+This product includes software developed by Tether Operations Limited.
+This package is a fork of @tetherto/wdk-wallet-tron
+(https://github.com/tetherto/wdk-wallet-tron), licensed under Apache 2.0.
+
+Original copyright:
+  Copyright 2024 Tether Operations Limited
+
+Modifications by SwapDK add an optional `data` (raw hex calldata) and
+`feeLimit` (SUN cap on energy) field to
+`WalletAccountTron.sendTransaction` and `WalletAccountTron.signTransaction`.
+When `data` is supplied, the wallet emits a `TriggerSmartContract`
+transaction with the calldata verbatim (via tronweb's `input` option
+on `transactionBuilder.triggerSmartContract` with an empty function
+selector). Required for invoking the THORChain router's
+`depositWithExpiry` for cross-chain swaps from TRON, since the upstream
+public surface only exposes plain TRX transfers and hardcoded TRC-20
+`transfer(address,uint256)`.
+
+Specific modifications are noted in the changed files via header
+comments. The intent is to upstream these changes — see the package
+README for the PR tracking link.

@@ -419,6 +419,19 @@ export default class WalletAccountCosmos {
       gas: DEFAULT_GAS_LIMIT,
     }
 
+    // Enforce transferMaxFee BEFORE broadcasting. The fee is fully
+    // determined by _parseGasPrice() above (deterministic from chain
+    // config), so we can reject upfront. Previously this check ran
+    // after signAndBroadcast — the tx was already in the mempool when
+    // the throw fired, making the cap unenforceable.
+    const plannedFee = BigInt(gasAmount)
+    if (
+      this._config.transferMaxFee !== undefined &&
+      plannedFee >= this._config.transferMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for transfer operation.')
+    }
+
     const wallet = this._wallet
     const channelConfig = isSamePrefix
       ? null
@@ -481,14 +494,9 @@ export default class WalletAccountCosmos {
       }
     )
 
+    // fee was pre-validated against transferMaxFee above; re-derive
+    // the bigint here just for the result shape.
     const totalFee = BigInt(fee.amount[0].amount)
-
-    if (
-      this._config.transferMaxFee !== undefined &&
-      totalFee >= this._config.transferMaxFee
-    ) {
-      throw new Error('Exceeded maximum fee cost for transfer operation.')
-    }
 
     return {
       hash: result.transactionHash,
@@ -687,6 +695,17 @@ export default class WalletAccountCosmos {
       gas: String(overrides.gas ?? DEFAULT_TRANSFER_GAS_LIMIT),
     }
 
+    // Enforce transferMaxFee BEFORE broadcasting (same reasoning as
+    // transfer() above — the fee is deterministic from chain config so
+    // the post-broadcast throw the original code did was unenforceable).
+    const plannedFee = BigInt(gasAmount)
+    if (
+      this._config.transferMaxFee !== undefined &&
+      plannedFee >= this._config.transferMaxFee
+    ) {
+      throw new Error('Exceeded maximum fee cost for deposit operation.')
+    }
+
     const wallet = this._wallet
     const registry = createThorMayaRegistry()
 
@@ -706,13 +725,8 @@ export default class WalletAccountCosmos {
       }
     )
 
+    // fee was pre-validated against transferMaxFee above.
     const totalFee = BigInt(fee.amount[0].amount)
-    if (
-      this._config.transferMaxFee !== undefined &&
-      totalFee >= this._config.transferMaxFee
-    ) {
-      throw new Error('Exceeded maximum fee cost for deposit operation.')
-    }
 
     return {
       hash: result.transactionHash,

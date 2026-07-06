@@ -1,0 +1,229 @@
+# OP_RETURN memo support patch for @tetherto/wdk-wallet-btc@1.0.0-beta.9
+# Apply with: cd <wdk-wallet-btc-repo> && git apply <this-file>
+
+--- a/src/wallet-account-btc.js
++++ b/src/wallet-account-btc.js
+@@ -70,9 +70,36 @@
+ 
+ const POLLING_INTERVAL = 300
+ 
++// Bitcoin Core standardness limit for OP_RETURN payloads on relay
++// (MAX_OP_RETURN_RELAY in policy.h). Transactions with larger payloads
++// are valid by consensus but won't propagate on the default mempool.
++export const MAX_OP_RETURN_BYTES = 80
++
+ const bip32 = BIP32Factory(ecc)
+ 
+ initEccLib(ecc)
++
++/**
++ * Normalizes a memo payload into a Buffer of raw bytes for embedding in
++ * an OP_RETURN output, or `null` when no memo is supplied.
++ *
++ * @param {string | Uint8Array | Buffer | null | undefined} memo - The memo bytes.
++ * @returns {Buffer | null} The memo as a Buffer, or null when omitted.
++ * @throws {RangeError} When the memo exceeds the OP_RETURN standardness cap.
++ */
++export function _normalizeMemo (memo) {
++  if (memo === undefined || memo === null) return null
++  const buf = typeof memo === 'string'
++    ? Buffer.from(memo, 'utf8')
++    : Buffer.from(memo)
++  if (buf.length === 0) return null
++  if (buf.length > MAX_OP_RETURN_BYTES) {
++    throw new RangeError(
++      `OP_RETURN memo is ${buf.length} bytes; the standardness rule caps it at ${MAX_OP_RETURN_BYTES} bytes.`
++    )
++  }
++  return buf
++}
+ 
+ function derivePath (seed, path) {
+   const masterKeyAndChainCodeBuffer = hmac(sha512, MASTER_SECRET, seed)
+@@ -205,8 +232,8 @@
+    * @param {BtcTransaction} tx - The transaction to sign.
+    * @returns {Promise<string>} The signed raw transaction as a hex string.
+    */
+-  async signTransaction ({ to, value, feeRate, confirmationTarget = 1 }) {
+-    const { tx } = await this._buildSignedTransaction({ to, value, feeRate, confirmationTarget })
++  async signTransaction ({ to, value, feeRate, confirmationTarget = 1, memo }) {
++    const { tx } = await this._buildSignedTransaction({ to, value, feeRate, confirmationTarget, memo })
+     return tx.hex
+   }
+ 
+@@ -217,8 +244,8 @@
+    * @param {number} [timeoutMs] - Maximum milliseconds to poll for spent inputs to disappear from unspent outputs after broadcast.
+    * @returns {Promise<TransactionResult>} The transaction's result.
+    */
+-  async sendTransaction ({ to, value, feeRate, confirmationTarget = 1 }, timeoutMs = 10000) {
+-    const { tx, utxos } = await this._buildSignedTransaction({ to, value, feeRate, confirmationTarget })
++  async sendTransaction ({ to, value, feeRate, confirmationTarget = 1, memo }, timeoutMs = 10000) {
++    const { tx, utxos } = await this._buildSignedTransaction({ to, value, feeRate, confirmationTarget, memo })
+ 
+     const address = await this.getAddress()
+     let retries = Math.ceil(timeoutMs / POLLING_INTERVAL)
+@@ -430,13 +457,18 @@
+   }
+ 
+   /** @private */
+-  async _getRawTransaction ({ utxos, to, value, fee, feeRate, changeValue }) {
++  async _getRawTransaction ({ utxos, to, value, fee, feeRate, changeValue, memo }) {
+     feeRate = this._toBigInt(feeRate)
+     if (feeRate < 1n) feeRate = 1n
+     value = this._toBigInt(value)
+     changeValue = this._toBigInt(changeValue)
+     fee = this._toBigInt(fee)
+ 
++    const memoBytes = _normalizeMemo(memo)
++    const opReturnScript = memoBytes
++      ? payments.embed({ data: [memoBytes] }).output
++      : null
++
+     const legacyPrevTxCache = new Map()
+     const getPrevTxHex = async (txid) => {
+       if (legacyPrevTxCache.has(txid)) return legacyPrevTxCache.get(txid)
+@@ -478,6 +510,7 @@
+ 
+       psbt.addOutput({ address: to, value: Number(rcptVal) })
+       if (chgVal > 0n) psbt.addOutput({ address: await this.getAddress(), value: Number(chgVal) })
++      if (opReturnScript) psbt.addOutput({ script: opReturnScript, value: 0 })
+ 
+       utxos.forEach((_, index) => psbt.signInputHD(index, this._masterNode))
+       psbt.finalizeAllInputs()
+@@ -523,17 +556,18 @@
+   }
+ 
+   /** @private */
+-  async _buildSignedTransaction ({ to, value, feeRate, confirmationTarget = 1 }) {
++  async _buildSignedTransaction ({ to, value, feeRate, confirmationTarget = 1, memo }) {
+     await this._ensureConnected()
+     const address = await this.getAddress()
+     if (!feeRate) {
+       const feeEstimate = await this._client.estimateFee(confirmationTarget)
+       feeRate = this._toBigInt(Math.max(feeEstimate * 100_000, 1))
+     }
++    const memoBytes = _normalizeMemo(memo)
+     const { utxos, fee, changeValue } = await this._planSpend({
+-      fromAddress: address, toAddress: to, amount: value, feeRate
++      fromAddress: address, toAddress: to, amount: value, feeRate, memo: memoBytes
+     })
+-    const tx = await this._getRawTransaction({ utxos, to, value, fee, feeRate, changeValue })
++    const tx = await this._getRawTransaction({ utxos, to, value, fee, feeRate, changeValue, memo: memoBytes })
+     return { tx, utxos }
+   }
+ }
+--- a/src/wallet-account-read-only-btc.js
++++ b/src/wallet-account-read-only-btc.js
+@@ -95,6 +95,22 @@
+ 
+ const MIN_TX_FEE_SATS = 141
+ const MAX_UTXO_INPUTS = 200
++
++// Tx-level vbytes contributed by an OP_RETURN output carrying `dataLen`
++// bytes of payload:
++//   8  (value u64)
++// + 1  (script-length varint — always 1 byte for OP_RETURN scripts)
++// + 1  (OP_RETURN opcode)
++// + 1  (OP_PUSHBYTES_n for n ≤ 75, OP_PUSHDATA1 for 76 ≤ n ≤ 80)
++// + 1  (extra byte for OP_PUSHDATA1's length prefix when n ≥ 76)
++// + n  (payload)
++// Upper-bounded by `12 + dataLen` for n ≤ 75 and `13 + dataLen` for
++// 76 ≤ n ≤ 80; we use the larger of the two so coin-selection always
++// over-provisions rather than under-provisions the fee.
++export function _opReturnVBytes (dataLen) {
++  if (!dataLen || dataLen <= 0) return 0
++  return dataLen >= 76 ? 13 + dataLen : 12 + dataLen
++}
+ 
+ const BIP_BY_ADDRESS_PREFIX = {
+   1: 44,
+@@ -205,7 +221,7 @@
+    * @param {BtcTransaction} tx - The transaction.
+    * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
+    */
+-  async quoteSendTransaction ({ to, value, feeRate, confirmationTarget = 1 }) {
++  async quoteSendTransaction ({ to, value, feeRate, confirmationTarget = 1, memo }) {
+     await this._ensureConnected()
+ 
+     const address = await this.getAddress()
+@@ -219,7 +235,8 @@
+       fromAddress: address,
+       toAddress: to,
+       amount: value,
+-      feeRate
++      feeRate,
++      memo
+     })
+ 
+     return { fee: BigInt(fee) }
+@@ -274,6 +291,7 @@
+    *
+    * @param {Object} [opts] - Options.
+    * @param {number | bigint} [opts.feeRate] - Fee rate in sat/vB. If omitted, estimated via the client.
++   * @param {string | Uint8Array | Buffer} [opts.memo] - Optional OP_RETURN memo bytes to account for. When supplied, the spendable target leaves room for the OP_RETURN output.
+    * @returns {Promise<BtcMaxSpendableResult>} The estimated maximum spendable result.
+    */
+   async getMaxSpendable (opts = {}) {
+@@ -318,7 +336,13 @@
+     const txOverheadVBytes = 11
+     const outputVBytes = 34
+ 
+-    const twoOutputsVSize = txOverheadVBytes + (inputCount * inputVBytes) + (2 * outputVBytes)
++    const memoVBytes = opts.memo !== undefined && opts.memo !== null
++      ? _opReturnVBytes(typeof opts.memo === 'string'
++        ? Buffer.byteLength(opts.memo, 'utf8')
++        : opts.memo.length)
++      : 0
++
++    const twoOutputsVSize = txOverheadVBytes + (inputCount * inputVBytes) + (2 * outputVBytes) + memoVBytes
+     const twoOutputsFeeSats = Math.max(Math.ceil(twoOutputsVSize * feeRate), MIN_TX_FEE_SATS)
+     const twoOutputsRecipientAmountSats = totalInputValueSats - twoOutputsFeeSats - Number(this._dustLimit)
+     if (twoOutputsRecipientAmountSats > Number(this._dustLimit)) {
+@@ -329,7 +353,7 @@
+       }
+     }
+ 
+-    const oneOutputVSize = txOverheadVBytes + (inputCount * inputVBytes) + outputVBytes
++    const oneOutputVSize = txOverheadVBytes + (inputCount * inputVBytes) + outputVBytes + memoVBytes
+     const oneOutputFeeSats = Math.max(Math.ceil(oneOutputVSize * feeRate), MIN_TX_FEE_SATS)
+     const oneOutputRecipientAmountSats = totalInputValueSats - oneOutputFeeSats
+     if (oneOutputRecipientAmountSats <= this._dustLimit) {
+@@ -442,9 +466,10 @@
+    * @param {string} tx.toAddress - The recipient's address.
+    * @param {number | bigint} tx.amount - The amount to send (in satoshis).
+    * @param {number | bigint} tx.feeRate - The fee rate (in sats/vB).
++   * @param {string | Uint8Array | Buffer} [tx.memo] - Optional OP_RETURN memo bytes; when supplied, the fee is padded for the extra output.
+    * @returns {Promise<{ utxos: OutputWithValue[], fee: number, changeValue: number }>} - The funding plan.
+    */
+-  async _planSpend ({ fromAddress, toAddress, amount, feeRate }) {
++  async _planSpend ({ fromAddress, toAddress, amount, feeRate, memo }) {
+     amount = this._toBigInt(amount)
+     feeRate = this._toBigInt(feeRate)
+     if (feeRate < 1n) feeRate = 1n
+@@ -453,6 +478,13 @@
+       throw new Error(`The amount must be bigger than the dust limit (= ${this._dustLimit}).`)
+     }
+ 
++    const memoBytesLen = memo === undefined || memo === null
++      ? 0
++      : (typeof memo === 'string' ? Buffer.byteLength(memo, 'utf8') : memo.length)
++    const opReturnFee = memoBytesLen > 0
++      ? this._toBigInt(Math.ceil(_opReturnVBytes(memoBytesLen) * Number(feeRate)))
++      : 0n
++
+     const network = this._network
+ 
+     const fromAddressScriptHex = btcAddress.toOutputScript(fromAddress, network).toString('hex')
+@@ -486,7 +518,11 @@
+       throw new Error('Exceeded maximum allowed inputs for transaction.')
+     }
+ 
+-    const fee = this._toBigInt(Math.max(result.fee ?? 0, MIN_TX_FEE_SATS))
++    // coinselect was unaware of the OP_RETURN output (it isn't a
++    // spendable target); pad the fee here so the change covers it. If
++    // the inputs don't cover the bump, fall through to the existing
++    // insufficient-balance branch below.
++    const fee = this._toBigInt(Math.max(result.fee ?? 0, MIN_TX_FEE_SATS)) + opReturnFee
+ 
+     const utxos = result.utxos.map(({ __ref }) => ({
+       ...__ref,

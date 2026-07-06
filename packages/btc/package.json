@@ -1,15 +1,14 @@
 {
-  "name": "@swapdk/wdk-wallet-cosmos",
-  "version": "0.1.2",
-  "description": "WDK wallet module for Cosmos-SDK chains, with first-class support for THORChain (RUNE) and MAYAChain (CACAO) swap-deposit messages. Fork of @base58-io/wdk-wallet-cosmos.",
+  "name": "@swapdk/wdk-wallet-btc",
+  "version": "0.1.3",
+  "description": "WDK wallet module for Bitcoin, extending @tetherto/wdk-wallet-btc with OP_RETURN memo support so sendTransaction can attach swap memos (e.g. THORChain). Fork of @tetherto/wdk-wallet-btc.",
   "keywords": [
     "wdk",
     "wallet",
-    "cosmos",
+    "bip-32",
+    "bitcoin",
     "thorchain",
-    "mayachain",
-    "rune",
-    "cacao",
+    "op-return",
     "swapdk"
   ],
   "author": "SwapDK",
@@ -17,12 +16,15 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Swap-DK/wdk-wallets-swapdk.git",
-    "directory": "packages/cosmos"
+    "directory": "packages/btc"
   },
   "bugs": {
     "url": "https://github.com/Swap-DK/wdk-wallets-swapdk/issues"
   },
   "homepage": "https://swapdk.com",
+  "main": "index.js",
+  "type": "module",
+  "types": "./types/index.d.ts",
   "files": [
     "index.js",
     "bare.js",
@@ -33,9 +35,6 @@
     "NOTICE",
     "README.md"
   ],
-  "main": "index.js",
-  "type": "module",
-  "types": "./types/index.d.ts",
   "scripts": {
     "clean": "rm -rf types",
     "build": "tsc",
@@ -52,33 +51,23 @@
       "default": "./package.json"
     }
   },
-  "imports": {
-    "crypto": {
-      "bare": "bare-crypto",
-      "default": "crypto"
-    },
-    "crypto/*": {
-      "bare": "bare-crypto/*",
-      "default": "crypto/*"
-    }
-  },
   "dependencies": {
-    "@cosmjs/crypto": "0.37.0",
-    "@cosmjs/encoding": "0.37.0",
-    "@cosmjs/proto-signing": "0.37.0",
-    "@cosmjs/stargate": "0.37.0",
-    "@tetherto/wdk-wallet": "1.0.0-beta.7",
+    "@bitcoinerlab/coinselect": "1.3.1",
+    "@bitcoinerlab/descriptors": "2.3.1",
+    "@bitcoinerlab/secp256k1": "1.2.0",
+    "@mempool/electrum-client": "1.1.9",
+    "@tetherto/wdk-failover-provider": "1.0.0-beta.2",
+    "@tetherto/wdk-wallet": "1.0.0-beta.8",
     "bare-node-runtime": "1.1.4",
+    "bip32": "4.0.0",
     "bip39": "3.1.0",
-    "chain-registry": "2.0.109",
-    "protobufjs": "7.5.6",
+    "bitcoinjs-lib": "6.1.7",
+    "bitcoinjs-message": "2.2.0",
+    "lru-cache": "11.2.2",
+    "p-limit": "7.1.1",
     "sodium-universal": "5.0.1"
   },
   "devDependencies": {
-    "@types/jest": "30.0.0",
     "typescript": "5.9.3"
-  },
-  "overrides": {
-    "bare-tls": "2.1.7"
   }
 }

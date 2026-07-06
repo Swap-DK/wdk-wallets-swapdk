@@ -1,0 +1,19 @@
+@swapdk/wdk-wallet-btc
+Copyright 2026 SwapDK
+
+This product includes software developed by Tether Operations Limited.
+This package is a fork of @tetherto/wdk-wallet-btc
+(https://github.com/tetherto/wdk-wallet-btc), licensed under Apache 2.0.
+
+Original copyright:
+  Copyright 2024 Tether Operations Limited
+
+Modifications by SwapDK add optional `memo` support to
+`WalletAccountBtc.sendTransaction` / `signTransaction`, emitting the memo
+bytes as an additional OP_RETURN output on the spending transaction.
+Required for THORChain / MAYAChain inbound observation, which routes on
+the OP_RETURN payload of the BTC deposit.
+
+Specific modifications are noted in the changed files via header
+comments. The intent is to upstream these changes — see the package
+README for the PR tracking link.
